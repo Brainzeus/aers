@@ -11,7 +11,7 @@ import logging
 import base58
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, PrivateFormat, NoEncryption, load_pem_private_key
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from cryptography.hazmat.backends import default_backend
 import websockets
 import ssl
@@ -32,7 +32,7 @@ INITIAL_BRAINERS_SUPPLY = Fraction(5000000000, 1)
 MIN_FEE = Fraction(1, 1000)  # 0.001 BRAINERS
 MAX_FEE = Fraction(1, 100)   # 0.01 BRAINERS
 GIFT_VALIDATOR_BURN = Fraction(6000, 1)  # 6000 BRAINERS
-MIN_LIQUIDITY_DEX = Fraction(1000000, 1)  # 1 milion BRAINERS
+MIN_LIQUIDITY_DEX = Fraction(1000, 1)  # 1 milion BRAINERS
 MIN_LIQUIDITY_TTF = Fraction(500000, 1)  # 500k BRAINERS
 
 class BrainersJSONEncoder(json.JSONEncoder):
@@ -41,7 +41,7 @@ class BrainersJSONEncoder(json.JSONEncoder):
             return str(obj)
         if isinstance(obj, set):
             return list(obj)
-        if isinstance(obj, Validator):  # Custom serialization for Validator objects
+        if isinstance(obj, Validator):
             return obj.to_dict()
         if isinstance(obj, Token):
             return obj.to_dict()
@@ -514,6 +514,17 @@ class Blockchain:
         self.mempool = []
         self.state_root = None
         self.permanent_validator = None
+        self.network_code = self.load_or_generate_network_code()
+
+    def load_or_generate_network_code(self):
+        if os.path.exists('network_code.txt'):
+            with open('network_code.txt', 'r') as f:
+                return f.read().strip()
+        else:
+            network_code = ''.join(random.choices(string.ascii_lowercase + string.digits, k=16))
+            with open('network_code.txt', 'w') as f:
+                f.write(network_code)
+            return network_code
 
     async def initialize_database(self):
         self.db_connection = await aiosqlite.connect('brainers_blockchain.db')
@@ -557,12 +568,9 @@ class Blockchain:
         await self.db_connection.commit()
 
     async def create_genesis_block(self):
-        permanent_validator_wallet = Wallet()
-        self.permanent_validator = Validator(permanent_validator_wallet.address, self.total_supply / 10, is_permanent=True)
+        # Permanent validator address fix
+        self.permanent_validator = Validator("0xBrainers6gEWBMbitCTidhikgwko5djKMxkpE1jPaV", self.total_supply / 10, is_permanent=True)
         self.validators[self.permanent_validator.address] = self.permanent_validator
-
-        logger.info(f"Permanent Validator Address: {self.permanent_validator.address}")
-        logger.info(f"Permanent Validator Private Key: {permanent_validator_wallet.get_private_key()}")
 
         genesis_transactions = self.create_initial_distribution()
         genesis_block = Block(
@@ -578,31 +586,29 @@ class Blockchain:
         logger.info("Genesis block created")
 
     def create_initial_distribution(self) -> List[Transaction]:
-        distributions = [
-            ("Rezerva", Fraction(742, 10000)),
-            ("Lichiditate", Fraction(19, 100)),
-            ("Rez_stable_coin", Fraction(19, 100)),
-            ("Investitori_P", Fraction(20, 100)),
-            ("Garantie", Fraction(19, 100)),
-            ("Farming", Fraction(558, 10000))
+        # Predefined wallet allocations
+        allocations = [
+            ("0xBrainersEKEs23zsvUp7dHx5r8oc7ydw7SXzfNAbhi", Fraction(371000000, 1), "Rezerva"),
+            ("0xBrainersASQ2abrQ5dVVxpf4fj2fJB5JVa9qFdsZ5k", Fraction(950000000, 1), "Lichiditate"),
+            ("0xBrainersKAXDHeGdhPbLtE7cj9CAsiv6G8JAZgBtMf", Fraction(950000000, 1), "Rez_stable_coin"),
+            ("0xBrainersEn5mYsZDU5c5NmAkVv6XpPcMNUPgtDuWAT", Fraction(1000000000, 1), "Investitori_P"),
+            ("0xBrainers5Uej2Brz4heihbGwZMivSxnsdMEy9fZmXv", Fraction(950000000, 1), "Garantie"),
+            ("0xBrainers6kzpxp4cCBMRtRc3GnHWKnCdTJrYc13xSq", Fraction(279000000, 1), "Farming")
         ]
-        
+
         transactions = []
-        for category, percentage in distributions:
-            amount = self.total_supply * percentage
-            wallet = Wallet()
+        for address, amount, category in allocations:
             transaction = Transaction(
                 sender="0" * 40,  # Genesis transaction
-                recipient=wallet.address,
+                recipient=address,
                 amount=amount,
                 transaction_type="genesis",
                 fee=Fraction(0),
                 signature=""  # Genesis transactions are not signed
             )
             transactions.append(transaction)
-            self.accounts[wallet.address]["BRAINERS"] += amount
-            logger.info(f"Allocated {amount} BRAINERS to {category} wallet: {wallet.address}")
-            logger.info(f"{category} Wallet Private Key: {wallet.get_private_key()}")
+            self.accounts[address]["BRAINERS"] += amount
+            logger.info(f"Allocated {amount} BRAINERS to {category} wallet: {address}")
         
         return transactions
 
@@ -613,6 +619,10 @@ class Blockchain:
         return fee
 
     async def add_transaction(self, transaction: Transaction) -> bool:
+        if transaction.data.get('network_code') != self.network_code:
+            logger.error("Invalid network code in transaction")
+            return False
+
         if transaction.transaction_type != "genesis":
             if self.accounts[transaction.sender][transaction.data.get('token', 'BRAINERS')] < transaction.amount + transaction.fee:
                 logger.error(f"Insufficient balance for sender {transaction.sender}")
@@ -764,94 +774,6 @@ class Blockchain:
         except Exception as e:
             logger.error(f"Smart contract execution failed: {str(e)}")
 
-    async def create_smart_contract(self, creator: str, code: str, abi: Dict[str, Any]) -> str:
-        contract_address = f"0xBrainers{''.join(random.choices(string.ascii_lowercase + string.digits, k=6))}"
-        new_contract = SmartContract(contract_address, creator, code, abi)
-        self.smart_contracts[contract_address] = new_contract
-        
-        create_contract_tx = Transaction(
-            sender=creator,
-            recipient=contract_address,
-            amount=Fraction(0),
-            transaction_type="create_smart_contract",
-            fee=self.calculate_transaction_fee(Fraction(0)),
-            data={
-                'code': code,
-                'abi': abi
-            }
-        )
-        await self.add_transaction(create_contract_tx)
-
-        return contract_address
-
-    async def create_token(self, creator: str, name: str, symbol: str, total_supply: Fraction, is_minable: bool = False) -> str:
-        create_token_tx = Transaction(
-            sender=creator,
-            recipient="0" * 40,  # Token creation doesn't have a recipient
-            amount=total_supply,
-            transaction_type="create_token",
-            fee=self.calculate_transaction_fee(total_supply),
-            data={
-                'name': name,
-                'symbol': symbol,
-                'is_minable': is_minable
-            }
-        )
-        success = await self.add_transaction(create_token_tx)
-        if success:
-            new_token = Token(name, symbol, total_supply, creator, is_minable)
-            self.tokens[new_token.address] = new_token
-            return new_token.address
-        return None
-
-    async def stake_tokens(self, staker: str, amount: Fraction) -> bool:
-        stake_tx = Transaction(
-            sender=staker,
-            recipient=staker,
-            amount=amount,
-            transaction_type="stake",
-            fee=self.calculate_transaction_fee(amount),
-            data={'token': 'BRAINERS'}
-        )
-        return await self.add_transaction(stake_tx)
-
-    async def unstake_tokens(self, staker: str, amount: Fraction) -> bool:
-        if staker not in self.validators or self.validators[staker].stake < amount:
-            return False
-        unstake_tx = Transaction(
-            sender=staker,
-            recipient=staker,
-            amount=amount,
-            transaction_type="unstake",
-            fee=self.calculate_transaction_fee(amount),
-            data={'token': 'BRAINERS'}
-        )
-        return await self.add_transaction(unstake_tx)
-
-    async def gift_validator(self, gifter: str, recipient: str) -> bool:
-        if self.accounts[gifter]['BRAINERS'] < GIFT_VALIDATOR_BURN:
-            return False
-        gift_tx = Transaction(
-            sender=gifter,
-            recipient=recipient,
-            amount=GIFT_VALIDATOR_BURN,
-            transaction_type="gift_validator",
-            fee=self.calculate_transaction_fee(GIFT_VALIDATOR_BURN),
-            data={'token': 'BRAINERS'}
-        )
-        return await self.add_transaction(gift_tx)
-
-    async def burn_tokens(self, burner: str, amount: Fraction, token: str = 'BRAINERS') -> bool:
-        burn_tx = Transaction(
-            sender=burner,
-            recipient="0" * 40,  # Burn address
-            amount=amount,
-            transaction_type="burn",
-            fee=self.calculate_transaction_fee(amount),
-            data={'token': token}
-        )
-        return await self.add_transaction(burn_tx)
-
     async def save_block(self, block: Block):
         await self.db_connection.execute(
             "INSERT OR REPLACE INTO blocks (hash, data) VALUES (?, ?)",
@@ -879,7 +801,6 @@ class Blockchain:
         return None
 
     def calculate_block_reward(self) -> Fraction:
-        # Implementare simplă, poate fi ajustată pentru a include halvings sau alte mecanisme
         return Fraction(1, 1)
 
     async def get_balance(self, address: str, token: str = 'BRAINERS') -> Fraction:
@@ -910,7 +831,6 @@ class Blockchain:
         for block_data in peer_blocks:
             block = Block.from_dict(block_data)
             if block.index > len(self.chain):
-                # Verificăm validitatea blocului
                 if self.is_valid_block(block):
                     self.chain.append(block)
                     for tx in block.transactions:
@@ -920,7 +840,6 @@ class Blockchain:
                     logger.warning(f"Invalid block received: {block.hash}")
 
     def is_valid_block(self, block: Block) -> bool:
-        # Implementare simplificată a validării blocului
         if block.index > 0:
             previous_block = self.chain[block.index - 1]
             if block.previous_hash != previous_block.hash:
@@ -930,19 +849,7 @@ class Blockchain:
                 return False
         return True
 
-    async def get_blockchain_state(self) -> Dict:
-        return {
-            'chain_length': len(self.chain),
-            'last_block_hash': self.chain[-1].hash if self.chain else None,
-            'state_root': self.state_root,
-            'pending_transactions': len(self.mempool),
-            'active_validators': sum(1 for v in self.validators.values() if v.is_active),
-            'total_supply': str(self.total_supply),
-            'circulating_supply': str(sum(self.accounts[addr]['BRAINERS'] for addr in self.accounts))
-        }
-
     async def reindex_blockchain(self):
-        # Reindexarea completă a blockchain-ului, utilă pentru recuperare sau verificări
         self.accounts = defaultdict(lambda: defaultdict(Fraction))
         self.validators = {}
         self.tokens = {}
@@ -953,12 +860,6 @@ class Blockchain:
                 await self.apply_transaction(tx)
 
         self.state_root = self.calculate_state_root()
-
-    async def create_custom_token(self, creator: str, name: str, symbol: str, total_supply: Fraction, is_minable: bool, attributes: Dict[str, Any]) -> str:
-        token_address = await self.create_token(creator, name, symbol, total_supply, is_minable)
-        if token_address:
-            self.tokens[token_address].attributes = attributes
-        return token_address
 
     async def transfer_tokens(self, sender: str, recipient: str, amount: Fraction, token: str = 'BRAINERS') -> bool:
         transfer_tx = Transaction(
@@ -971,23 +872,11 @@ class Blockchain:
         )
         return await self.add_transaction(transfer_tx)
 
-    async def get_transaction_history(self, address: str) -> List[Dict]:
-        history = []
-        for block in self.chain:
-            for tx in block.transactions:
-                if tx.sender == address or tx.recipient == address:
-                    history.append(tx.to_dict())
-        return history
-
-    async def get_smart_contract_info(self, contract_address: str) -> Optional[Dict]:
-        contract = self.smart_contracts.get(contract_address)
-        if contract:
-            return contract.to_dict()
-        return None
-
-    async def update_validator_nodes(self):
-        active_validators = [v for v in self.validators.values() if v.is_active and v.stake >= self.min_stake]
-        logger.info(f"Active validators updated. Count: {len(active_validators)}")
+    async def create_custom_token(self, creator: str, name: str, symbol: str, total_supply: Fraction, is_minable: bool, attributes: Dict[str, Any]) -> str:
+        token_address = await self.create_token(creator, name, symbol, total_supply, is_minable)
+        if token_address:
+            self.tokens[token_address].attributes = attributes
+        return token_address
 
     async def process_mempool(self):
         while self.mempool:
@@ -1212,21 +1101,12 @@ async def main():
     
     runner = web.AppRunner(api.app)
     await runner.setup()
-    site = web.TCPSite(runner, 'brainers.co', 8080)
+    site = web.TCPSite(runner, 'localhost', 8080)
     
     await asyncio.gather(
         node.start(),
         site.start()
     )
-
-    print(f"Permanent Validator Address: {blockchain.permanent_validator.address}")
-    print(f"Permanent Validator Private Key: {blockchain.permanent_validator.private_key}")
-    
-    print("Initial distribution wallet addresses and private keys:")
-    for wallet in blockchain.initial_wallets:
-        print(f"Address: {wallet.address}")
-        print(f"Private Key: {wallet.get_private_key()}")
-        print("---")
 
     try:
         while True:
