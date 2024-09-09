@@ -1101,7 +1101,7 @@ async def main():
     
     runner = web.AppRunner(api.app)
     await runner.setup()
-    site = web.TCPSite(runner, 'brainers.co', 8080)
+    site = web.TCPSite(runner, '161.35.82.12', 8080)
     
     await asyncio.gather(
         node.start(),
